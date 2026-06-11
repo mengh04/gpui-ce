@@ -493,6 +493,7 @@ pub struct Quad {
     pub border_color: Hsla,
     pub corner_radii: Corners<ScaledPixels>,
     pub border_widths: Edges<ScaledPixels>,
+    pub transformation: TransformationMatrix,
 }
 
 impl From<Quad> for Primitive {
@@ -512,6 +513,7 @@ pub struct Underline {
     pub color: Hsla,
     pub thickness: ScaledPixels,
     pub wavy: u32,
+    pub transformation: TransformationMatrix,
 }
 
 impl From<Underline> for Primitive {
@@ -535,6 +537,7 @@ pub struct Shadow {
     /// 0 = drop shadow (rendered outside the element), 1 = inset shadow (rendered inside).
     pub inset: u32,
     pub pad: u32, // align to 8 bytes
+    pub transformation: TransformationMatrix,
 }
 
 impl From<Shadow> for Primitive {
@@ -657,6 +660,29 @@ impl Default for TransformationMatrix {
     }
 }
 
+/// Compute the inverse of a 2D affine transformation matrix.
+///
+/// For a matrix `M` with rotation_scale `[[a,b],[c,d]]` and translation `[tx,ty]`:
+///   inv(M).rotation_scale = [[d,-b],[-c,a]] / det
+///   inv(M).translation     = -inv(rotation_scale) * [tx, ty]
+///
+/// Returns `None` when the matrix is singular (det ≈ 0).
+pub fn inverse_matrix(m: &TransformationMatrix) -> Option<TransformationMatrix> {
+    let [[a, b], [c, d]] = m.rotation_scale;
+    let det = a * d - b * c;
+    if det.abs() < 1e-10 {
+        return None;
+    }
+    let inv_rs = [[d / det, -b / det], [-c / det, a / det]];
+    // inv_trans = -inv_rs * [tx, ty]
+    let inv_tx = -(inv_rs[0][0] * m.translation[0] + inv_rs[0][1] * m.translation[1]);
+    let inv_ty = -(inv_rs[1][0] * m.translation[0] + inv_rs[1][1] * m.translation[1]);
+    Some(TransformationMatrix {
+        rotation_scale: inv_rs,
+        translation: [inv_tx, inv_ty],
+    })
+}
+
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
 #[expect(missing_docs)]
@@ -707,6 +733,7 @@ pub struct PolychromeSprite {
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     pub tile: AtlasTile,
+    pub transformation: TransformationMatrix,
 }
 
 impl From<PolychromeSprite> for Primitive {

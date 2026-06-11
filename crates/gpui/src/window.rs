@@ -17,7 +17,8 @@ use crate::{
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
     TextStyleRefinement, ThermalState, TransformationMatrix, Transition, TransitionState,
     Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem, point,
+    WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem, inverse_matrix,
+    point,
     prelude::*, px, rems, size, transparent_black,
 };
 use anyhow::{Context as _, Result, anyhow};
@@ -657,6 +658,12 @@ pub struct Hitbox {
     pub content_mask: ContentMask<Pixels>,
     /// Flags that specify hitbox behavior.
     pub behavior: HitboxBehavior,
+    /// Optional inverse transform. When set, the mouse position is
+    /// inverse-transformed before checking bounds. This gives pixel-
+    /// perfect hit-testing for rotated/scaled elements — the mouse
+    /// coordinate is mapped back into the element's local space before
+    /// the `contains` check.
+    pub inverse_transform: Option<TransformationMatrix>,
 }
 
 impl Hitbox {
@@ -911,8 +918,12 @@ impl Frame {
         let mut set_hover_hitbox_count = false;
         let mut hit_test = HitTest::default();
         for hitbox in self.hitboxes.iter().rev() {
+            let local_position = match &hitbox.inverse_transform {
+                Some(inv) => inv.apply(position),
+                None => position,
+            };
             let bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
-            if bounds.contains(&position) {
+            if bounds.contains(&local_position) {
                 hit_test.ids.push(hitbox.id);
                 if !set_hover_hitbox_count
                     && hitbox.behavior == HitboxBehavior::BlockMouseExceptScroll
@@ -980,6 +991,7 @@ pub struct Window {
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
+    pub(crate) element_transformation: TransformationMatrix,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
@@ -1678,6 +1690,7 @@ impl Window {
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
+            element_transformation: TransformationMatrix::unit(),
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
@@ -3160,6 +3173,20 @@ impl Window {
         }
     }
 
+    /// Temporarily disable content masking (clip rect).
+    ///
+    /// Use this when an element's visual output extends beyond its layout
+    /// bounds — e.g. a rotated or scaled element whose corners would be
+    /// clipped by the normal content mask.
+    pub fn with_unclipped<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.invalidator.debug_assert_paint();
+
+        let saved = std::mem::take(&mut self.content_mask_stack);
+        let result = f(self);
+        self.content_mask_stack = saved;
+        result
+    }
+
     /// Updates the global element offset relative to the current offset. This is used to implement
     /// scrolling. This method should only be called during the prepaint phase of element drawing.
     pub fn with_element_offset<R>(
@@ -3192,7 +3219,7 @@ impl Window {
         result
     }
 
-    pub(crate) fn with_element_opacity<R>(
+    pub fn with_element_opacity<R>(
         &mut self,
         opacity: Option<f32>,
         f: impl FnOnce(&mut Self) -> R,
@@ -3208,6 +3235,34 @@ impl Window {
         let result = f(self);
         self.element_opacity = previous_opacity;
         result
+    }
+
+    /// Push a transformation onto the element transform stack.
+    ///
+    /// The transformation composes with the current transform:
+    /// `current = current * push`, so parent transforms accumulate onto children.
+    /// Use [`Self::element_transformation`] to read the composed transform during painting.
+    pub fn with_element_transformation<R>(
+        &mut self,
+        transformation: Option<TransformationMatrix>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint_or_prepaint();
+
+        let Some(t) = transformation else {
+            return f(self);
+        };
+
+        let prev = self.element_transformation;
+        self.element_transformation = prev.compose(t);
+        let result = f(self);
+        self.element_transformation = prev;
+        result
+    }
+
+    /// Returns the current composed element transformation.
+    pub(crate) fn element_transformation(&self) -> TransformationMatrix {
+        self.element_transformation
     }
 
     /// Perform prepaint on child elements in a "retryable" manner, so that any side effects
@@ -3628,6 +3683,7 @@ impl Window {
                 element_corner_radii,
                 inset: 0,
                 pad: 0,
+                transformation: self.element_transformation,
             });
         }
     }
@@ -3673,6 +3729,7 @@ impl Window {
                 element_corner_radii,
                 inset: 1,
                 pad: 0,
+                transformation: self.element_transformation,
             });
         }
     }
@@ -3701,6 +3758,8 @@ impl Window {
             corner_radii: quad.corner_radii.scale(self.scale_factor()),
             border_widths: snapped_border_widths,
             border_style: quad.border_style,
+            transformation: self.element_transformation,
+            ..Quad::default()
         });
     }
 
@@ -3753,6 +3812,7 @@ impl Window {
             color: style.color.unwrap_or_default().opacity(element_opacity),
             thickness,
             wavy: if style.wavy { 1 } else { 0 },
+            transformation: self.element_transformation,
         });
     }
 
@@ -3783,6 +3843,7 @@ impl Window {
             thickness: self.snap_stroke(style.thickness),
             color: style.color.unwrap_or_default().opacity(opacity),
             wavy: 0,
+            transformation: self.element_transformation,
         });
     }
 
@@ -3855,7 +3916,7 @@ impl Window {
                     content_mask,
                     color: color.opacity(element_opacity),
                     tile,
-                    transformation: TransformationMatrix::unit(),
+                    transformation: self.element_transformation,
                 });
             } else {
                 self.next_frame.scene.insert_primitive(MonochromeSprite {
@@ -3865,7 +3926,7 @@ impl Window {
                     content_mask,
                     color: color.opacity(element_opacity),
                     tile,
-                    transformation: TransformationMatrix::unit(),
+                    transformation: self.element_transformation,
                 });
             }
         }
@@ -3948,6 +4009,7 @@ impl Window {
                 content_mask,
                 tile,
                 opacity,
+                transformation: self.element_transformation,
             });
         }
         Ok(())
@@ -4012,7 +4074,7 @@ impl Window {
             content_mask,
             color: color.opacity(element_opacity),
             tile,
-            transformation,
+            transformation: self.element_transformation.compose(transformation),
         });
 
         Ok(())
@@ -4063,6 +4125,7 @@ impl Window {
             corner_radii,
             tile,
             opacity,
+            transformation: self.element_transformation,
         });
         Ok(())
     }
@@ -4224,11 +4287,25 @@ impl Window {
         let content_mask = self.content_mask();
         let mut id = self.next_hitbox_id;
         self.next_hitbox_id = self.next_hitbox_id.next();
+
+        // When an element transformation is active, store its inverse so
+        // that Frame::hit_test can map the mouse position back to the
+        // element's local coordinate space before checking bounds.
+        // This gives pixel-perfect hit testing after rotate / scale —
+        // the same approach used by CSS compositor hit testing and
+        // Flutter's RenderTransform.hitTest.
+        let inverse_transform = if self.element_transformation != TransformationMatrix::unit() {
+            inverse_matrix(&self.element_transformation)
+        } else {
+            None
+        };
+
         let hitbox = Hitbox {
             id,
             bounds,
             content_mask,
             behavior,
+            inverse_transform,
         };
         self.next_frame.hitboxes.push(hitbox.clone());
         hitbox
