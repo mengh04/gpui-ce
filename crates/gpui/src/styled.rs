@@ -271,6 +271,16 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Enables flex item growth (flex-grow: 1).
+    ///
+    /// Tailwind-v4-style alias for [`Self::flex_grow`] — same effect, kept for
+    /// API parity with crates (e.g. `gpui-component`) that use the numbered form.
+    /// [Docs](https://tailwindcss.com/docs/flex-grow#grow-1)
+    fn flex_grow_1(mut self) -> Self {
+        self.style().flex_grow = Some(1.);
+        self
+    }
+
     /// Sets the element to allow a flex item to shrink if needed.
     /// [Docs](https://tailwindcss.com/docs/flex-shrink)
     fn flex_shrink(mut self) -> Self {
@@ -282,6 +292,16 @@ pub trait Styled: Sized {
     /// [Docs](https://tailwindcss.com/docs/flex-shrink#dont-shrink)
     fn flex_shrink_0(mut self) -> Self {
         self.style().flex_shrink = Some(0.);
+        self
+    }
+
+    /// Enables flex item shrinking (flex-shrink: 1).
+    ///
+    /// Tailwind-v4-style alias for [`Self::flex_shrink`] — same effect, kept for
+    /// API parity with crates (e.g. `gpui-component`) that use the numbered form.
+    /// [Docs](https://tailwindcss.com/docs/flex-shrink#shrink-1)
+    fn flex_shrink_1(mut self) -> Self {
+        self.style().flex_shrink = Some(1.);
         self
     }
 
